@@ -1,0 +1,212 @@
+================================================================================
+CMS CompOps Operational Glossary
+Version: 2025-11
+Maintained by: CMS Computing Operations Team
+================================================================================
+
+WORKFLOW STATES
+---------------
+
+new
+  Submitted to ReqMgr2 but not yet approved for production.
+
+assignment-approved
+  Reviewed and approved. ReqMgr2 will assign to WMAgents based on site
+  availability and data locality.
+
+acquired
+  A WMAgent has picked up the workflow and is splitting it into job units
+  for submission to HTCondor. Stuck in Acquired for >2-3 hours is abnormal
+  and requires investigation (see runbook: Stuck Workflows).
+
+running
+  Jobs have been submitted to HTCondor and are actively processing events.
+  Normal long-running state for most production workflows.
+
+completed
+  All job units finished. Workflow waiting for output merge and DBS3 registration.
+
+closed-out
+  Output datasets registered in DBS3 and workflow administratively closed.
+
+announced
+  Output datasets announced to physics community. Final lifecycle state.
+
+force-complete
+  Operator manually terminated the workflow regardless of events processed.
+  Last resort action. Requires CMSPROD JIRA ticket documentation.
+
+AM (Active/Monitoring)
+  Operator flag indicating workflow is under active monitoring due to
+  unusual behavior not requiring immediate action.
+
+SYSTEM COMPONENTS
+-----------------
+
+ReqMgr2 (Request Manager 2)
+  Entry point for all CMS workflow submissions. Validates workflow configs
+  and manages lifecycle state transitions. REST API at cmsweb.cern.ch/reqmgr2/
+
+Global WorkQueue
+  Receives approved workflows from ReqMgr2, splits into work units, and
+  distributes to WMAgents at computing sites. Top-level job broker.
+
+WMAgent (Workflow Management Agent)
+  Software running at each site managing local job submission. Maintains a
+  local CouchDB for state tracking and communicates with the Global WorkQueue.
+  REST API on the agent host at port 8240.
+
+WMStats
+  Dashboard for monitoring all workflows and jobs across CMS computing.
+  Primary tool for CompOps operators. http://cms-wmstats.cern.ch/wmstats
+
+Unified
+  Operations control tool for policy-level decisions. Operators assign
+  workflows to sites, modify priorities, trigger Force Complete, etc.
+  http://cms-unified.cern.ch/
+
+CouchDB
+  Document-oriented NoSQL database. Each WMAgent runs a local CouchDB
+  replicating bidirectionally with central CouchDB at CERN. Loss of
+  CouchDB connectivity (including local disk exhaustion) causes WMAgents
+  to enter Draining state automatically.
+
+HTCondor
+  High-throughput computing job scheduler used across the CMS grid. WMAgents
+  use HTCondor to submit batch jobs to local clusters and via GlideinWMS.
+
+GlideinWMS (Glidein Workflow Management System)
+  Pilot-based job submission framework. Submits lightweight pilot jobs to
+  sites via grid middleware. Pilots land on worker nodes and pull CMS jobs
+  from a central queue. Enables transparent use of diverse grid resources.
+
+CVMFS (CernVM File System)
+  Distributed read-only filesystem delivering CMS software to worker nodes
+  globally on demand. Correct CMSSW version auto-accessed without local install.
+
+McM (Monte Carlo Management)
+  Web interface where physicists submit Monte Carlo simulation requests.
+  Approved requests are submitted to ReqMgr2 for production.
+
+DATA MANAGEMENT
+---------------
+
+Rucio
+  CMS data management system. Tracks every file and dataset replica across
+  all CMS storage resources. Manages data placement rules and orchestrates
+  transfers between sites via FTS.
+
+DID (Data Identifier)
+  Rucio naming scheme for datasets and files.
+  Format: /PrimaryDataset/ProcessingString/DataTier
+  Example: /TTJets_TuneCP5_13p6TeV/Run3Summer23MiniAODv4-130X/MINIAODSIM
+
+RSE (Rucio Storage Element)
+  A storage resource registered in Rucio. Each site has one or more RSEs.
+  Examples: T2_US_MIT_Disk, T1_DE_KIT_Tape, T0_CH_CERN_Tape.
+
+Rucio Rule
+  Instruction to Rucio to maintain N copies of a dataset at specific RSEs.
+  States: OK, REPLICATING, STUCK, SUSPENDED, WAITING_APPROVAL.
+  STUCK rules require operator attention.
+
+Rucio ConMon (Consistency Monitor)
+  Monitors consistency between Rucio's view and physical disk contents.
+  Detects dark data (files on disk not in Rucio) and missing files.
+
+FTS (File Transfer Service)
+  CERN service executing file transfers between grid storage endpoints.
+  Rucio uses FTS as its transfer backend. Requires valid grid proxy
+  certificates. Monitored at https://fts3.cern.ch/ftsmon/
+
+GridFTP error codes (common):
+  530: Login incorrect - authentication/proxy failure
+  425: Cannot open data connection - network/firewall issue
+  553: Cannot create file - storage permission or space issue
+
+MyProxy
+  Credential management server for long-lived grid proxy certificates.
+  FTS services use MyProxy for automated transfer authentication.
+  Silent MyProxy renewal failures are a common cause of mass transfer failures.
+
+DBS3 (Dataset Bookkeeping System)
+  CMS dataset registry. All datasets and files must be registered in DBS3
+  to be recognized for analysis.
+
+WMArchive
+  Long-term storage for Framework Job Reports (FWJRs) from all CMS jobs.
+  Used to diagnose job failures by examining exit codes and error messages.
+
+FWJR (Framework Job Report)
+  Document produced by every CMS job recording input files, output files,
+  CPU/memory usage, exit code, and error messages. Primary diagnostic artifact.
+
+Common FWJR exit codes:
+  8001: Input file read error (storage I/O or corrupt file)
+  8002: Output file write failure (storage full or permissions)
+  50115: CMSSW segfault (hardware or software bug)
+  84: Worker node lost scheduler contact (transient, usually retries)
+  134: CMSSW aborted (memory issue or config error)
+
+SITES
+-----
+
+T0 (Tier-0)
+  CERN itself. Raw LHC data processed here first.
+  T0_CH_CERN_Tape: primary tape archival storage for all raw data.
+
+T1 Sites (~13 worldwide)
+  Large national centres with tape storage. Perform re-reconstruction.
+    T1_US_FNAL    - Fermilab, Illinois, USA
+    T1_DE_KIT     - Karlsruhe Institute of Technology, Germany
+    T1_IT_CNAF    - INFN CNAF, Bologna, Italy
+    T1_ES_PIC     - Port d'Informació Científica, Barcelona, Spain
+    T1_FR_CCIN2P3 - CC-IN2P3, Lyon, France
+
+T2 Sites (~160 worldwide)
+  University/lab clusters for Monte Carlo and analysis. No tape storage.
+    T2_US_MIT      - Massachusetts Institute of Technology, USA
+    T2_CH_CERN     - CERN Meyrin, Switzerland
+    T2_IT_Bari     - INFN Bari, Italy
+    T2_IN_TIFR     - Tata Institute of Fundamental Research, India
+    T2_BR_SPRACE   - SPRACE, São Paulo, Brazil
+
+CRIC (Computing Resource Information Catalogue)
+  Registry of all CMS computing resources. WMS consults CRIC to determine
+  where workflows can run and data can be stored.
+  https://cms-cric.cern.ch/
+
+GGUS (Global Grid User Support)
+  Grid-wide ticketing system for site-level problems. File GGUS tickets
+  when a site has issues requiring site admin action. https://ggus.eu
+
+COMMON ERROR PATTERNS
+---------------------
+
+WMAgent in Draining state
+  Most common: CouchDB unreachable (disk full, network issue, service crash).
+  Recovery: fix CouchDB, then reconfigure agent:
+    curl -X POST http://<agent>:8240/agent/reconfigure
+
+Mass transfers failing with "530 Login incorrect"
+  Expired or invalid grid proxy at source site. Contact site admin to renew
+  MyProxy credential. After renewal, reevaluate stuck Rucio rules.
+
+Jobs Idle but not running (pilot/job mismatch)
+  OS platform incompatibility (e.g. EL7 pilots vs EL8/EL9 job requirements)
+  or resource mismatch. Check pilot ClassAds vs job requirements.
+
+High failure rate with exit code 8001
+  Input file read failures. Check site storage health and XRootD accessibility.
+  Verify: xrdfs <site-xrd-endpoint> ls <input-file-path>
+
+CONTACTS
+--------
+CompOps on-call: @compops-oncall (Mattermost)
+Mattermost: #compops-oncall, #cms-sites, #cms-production
+JIRA: https://its.cern.ch/jira/ (CMSPROD, CMSTRANSF projects)
+WMStats: http://cms-wmstats.cern.ch/wmstats
+Unified: http://cms-unified.cern.ch/
+FTS Monitor: https://fts3.cern.ch/ftsmon/
+GGUS: https://ggus.eu
+Workflow states: https://github.com/dmwm/WMCore/wiki/workflow-states

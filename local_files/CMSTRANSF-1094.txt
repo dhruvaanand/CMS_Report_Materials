@@ -1,0 +1,147 @@
+JIRA Project: CMSTRANSF
+Ticket ID: CMSTRANSF-1094
+Title: Mass transfer failures T1_DE_KIT -> T2_CH_CERN - FTS 530 auth error
+Type: Incident
+Priority: High
+Reporter: on-shift-operator (S. Bhattacharya)
+Assignee: compops-transfers (R. Lampl)
+Created: 2025-12-02 14:05 UTC
+Resolved: 2025-12-02 19:33 UTC
+Status: Closed
+Labels: rucio, fts, transfer-failure, t1-de-kit, proxy-credentials
+Linked Issues: GGUS-156789 (site ticket filed against T1_DE_KIT)
+
+================================================================================
+DESCRIPTION
+================================================================================
+
+Observing mass transfer failures between T1_DE_KIT (source) and T2_CH_CERN
+(destination) starting around 13:02 UTC today. 
+
+Rucio ConMon dashboard shows:
+  - 8,412 files stuck in SUBMITTED state on T1_DE_KIT -> T2_CH_CERN link
+  - Failure rate for this link: 97% over last 2 hours
+  - Estimated blocked data volume: ~2.3 TB
+
+FTS monitoring (https://fts3.cern.ch/ftsmon/) shows all transfers on this
+link failing with:
+  [GRIDFTP] 530 Login incorrect
+
+Affected datasets include NanoAOD samples needed for ongoing BPH analysis
+and several re-reco output datasets being staged for tape archival.
+
+Transfers from T1_DE_KIT to other destinations (T1_ES_PIC, T2_DE_DESY)
+appear unaffected. Transfers from other sources to T2_CH_CERN also
+unaffected. Issue is specific to this site pair.
+
+================================================================================
+COMMENTS
+================================================================================
+
+[S. Bhattacharya | 2025-12-02 14:22 UTC]
+Cross-checked FTS job details. Error is consistently:
+  Type: GRIDFTP
+  Subtype: DESTINATION
+  Reason: 530 Login incorrect (user/proxy certificate not accepted)
+
+The 530 error code in GridFTP means authentication failure - the server
+refused the presented credential. Since transfers from KIT to other sites
+work fine, the KIT FTS service itself is running. The credential being
+rejected must be specific to the KIT->CERN path, suggesting the proxy
+used by KIT's FTS for CERN storage authentication has expired.
+
+Tested manually from lxplus:
+  $ gfal-ls gsiftp://eoscms.cern.ch/eos/cms/store/test/ \
+      --cert /tmp/x509_kit_proxy
+  gfal-ls error 13 (Permission denied): Permission denied (proxy expired 
+  or not trusted by endpoint)
+
+Confirmed: the grid proxy certificate being used by T1_DE_KIT's FTS 
+service for authentication to CERN storage has expired.
+
+Filing GGUS ticket against T1_DE_KIT now.
+
+[S. Bhattacharya | 2025-12-02 14:38 UTC]
+GGUS-156789 filed. Contacted T1_DE_KIT site admin team via GGUS and
+directly on the CMS Mattermost #cms-t1-sites channel.
+Also notified BPH physics group that their NanoAOD staging is blocked -
+ETA unknown pending KIT response.
+
+[KIT-Admin (T1_DE_KIT) | 2025-12-02 15:14 UTC]
+Hello, we identified the issue. The myproxy credential used by our FTS
+service to authenticate to CERN EOS expired at 13:02 UTC today.
+
+The automated renewal cron job that normally refreshes this credential
+every 12 hours stopped working after we updated the myproxy server
+hostname last week (old: myproxy.kit.de, new: myproxy2.kit.de). The
+cron job was silently failing for 6 days because it was connecting to
+the old hostname, which still resolves but returns an auth error.
+
+We are renewing the credential manually now and will update the cron job.
+
+[R. Lampl | 2025-12-02 15:45 UTC]
+KIT admin has renewed the proxy. Testing manually:
+  $ gfal-ls gsiftp://eoscms.cern.ch/eos/cms/store/test/ \
+      --cert /tmp/x509_kit_proxy_new
+  drwxrwxr-x ... .
+  drwxrwxr-x ... ..
+  [directory listing continues normally]
+
+Authentication working. Now need to re-trigger the stuck Rucio rules.
+
+Checking affected rules:
+  $ rucio list-rules --account=wma_prod --rse-expression=T2_CH_CERN \
+      --state=STUCK | grep KIT
+  [returns 3 rules with STUCK status]
+
+Re-evaluating the stuck rules:
+  $ rucio-admin rule reevaluate --rule-id=a3f2...  
+  $ rucio-admin rule reevaluate --rule-id=b8e1...
+  $ rucio-admin rule reevaluate --rule-id=c9d4...
+
+FTS is picking up transfers again. Seeing submission rate recovering on
+the T1_DE_KIT -> T2_CH_CERN link in FTS monitoring.
+
+[R. Lampl | 2025-12-02 17:00 UTC]
+Transfer recovery in progress. Current status:
+  - Files transferred successfully: 3,841 / 8,412
+  - Current throughput: ~1.4 GB/s
+  - Estimated time to complete remaining: ~25 minutes
+
+[S. Bhattacharya | 2025-12-02 19:33 UTC]
+All 8,412 files transferred successfully. Rucio ConMon shows consistency
+restored for T2_CH_CERN. BPH group notified their datasets are available.
+
+Closing ticket. GGUS-156789 resolved and closed on KIT side.
+
+Note for operators: if you see mass 530 errors on a single source->dest
+link, check FTS error details and test the proxy manually with gfal-ls.
+Silent cron job failures for myproxy renewal are a recurring pattern.
+
+================================================================================
+RESOLUTION
+================================================================================
+
+Root Cause:
+  MyProxy credential renewal cron job at T1_DE_KIT was silently failing for
+  6 days due to a hostname change in the MyProxy server (myproxy.kit.de ->
+  myproxy2.kit.de). The credential expired at 13:02 UTC, causing all FTS
+  transfers from KIT to CERN to fail with GridFTP 530 authentication error.
+
+Impact:
+  8,412 files (~2.3 TB) blocked for approximately 5.5 hours.
+  BPH NanoAOD staging delayed. Re-reco tape archival delayed.
+  No data loss. All files eventually transferred successfully.
+
+Fix Applied:
+  1. KIT admin manually renewed MyProxy credential
+  2. KIT admin updated cron job to use new MyProxy server hostname
+  3. Stuck Rucio rules re-evaluated via rucio-admin
+  4. Transfers completed normally
+
+Time to Resolution: 5h 28m
+
+Follow-up:
+  - KIT will add monitoring for myproxy credential expiry (alert 24h before)
+  - CompOps to add "check myproxy expiry" to transfer failure triage checklist
+  - Consider adding credential validity check to Rucio ConMon alerts

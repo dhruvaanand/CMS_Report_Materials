@@ -1,0 +1,122 @@
+JIRA Project: CMSPROD
+Ticket ID: CMSPROD-4956
+Title: Job starvation at T2_IT_Bari and T2_IT_Legnaro - GlideinWMS pilots not landing
+Type: Incident
+Priority: Medium
+Reporter: on-shift-operator (F. Cossutti)
+Assignee: compops-oncall (A. Perez)
+Created: 2026-01-08 11:14 UTC
+Resolved: 2026-01-08 16:40 UTC
+Status: Closed
+Labels: glideinwms, pilots, htcondor, t2-it-bari, t2-it-legnaro
+Linked Issues: GGUS-158341
+
+================================================================================
+DESCRIPTION
+================================================================================
+
+Both T2_IT_Bari and T2_IT_Legnaro showing near-zero job counts since ~09:30 UTC.
+WMStats shows:
+  T2_IT_Bari:    Running: 12   (normal: ~800)
+  T2_IT_Legnaro: Running: 4    (normal: ~600)
+
+CRIC shows both sites as Active with normal capacity. No GGUS tickets filed.
+Input data is present at both sites. WMAgents for both sites appear healthy
+and in Running state.
+
+HTCondor queue at both sites shows jobs in Idle state but not starting -
+pilots are either not landing or not matching. This looks like a GlideinWMS
+issue rather than a WMAgent issue.
+
+================================================================================
+COMMENTS
+================================================================================
+
+[F. Cossutti | 2025-01-08 11:30 UTC]
+Checked HTCondor status at both sites. Large number of Idle jobs:
+  T2_IT_Bari:    Idle: 3,421  Running: 12  (pilots not matching jobs)
+  T2_IT_Legnaro: Idle: 2,890  Running: 4
+
+This means pilots ARE landing (otherwise there would be no jobs in the queue
+at all) but the pilots and jobs are not matching. This is different from
+pilots not landing at all.
+
+Checked pilot ClassAds. Pilots at both sites are advertising:
+  CMSPlatform = "el7"
+  
+But the queued jobs require:
+  CMSPlatform = "el8" or "el9"
+
+The sites are running EL7 (Red Hat Enterprise Linux 7) pilots but our
+workflows now require EL8 or EL9. This is a CMSSW compatibility issue -
+newer CMSSW releases no longer support EL7.
+
+[F. Cossutti | 2025-01-08 11:52 UTC]
+Contacted Italian T2 site admins. Both Bari and Legnaro are in the process
+of migrating worker nodes from EL7 to EL8 but migration is not complete.
+Current breakdown at T2_IT_Bari:
+  EL7 nodes: 680 (still running EL7 OS)
+  EL8 nodes: 140 (migration complete)
+  In progress: 200 nodes
+
+The 140 EL8 nodes are working but insufficient to handle the full workload.
+The EL7 nodes are idle because no jobs require EL7 anymore.
+
+[A. Perez | 2025-01-08 12:15 UTC]
+Discussed with site admins. Temporary mitigation options:
+  1. Exclude T2_IT_Bari and T2_IT_Legnaro from workflow assignment until
+     migration completes (loses ~1400 CPU slots)
+  2. Keep sites active, accept reduced throughput from EL8 nodes only
+  3. Ask sites to prioritize EL8 migration for specific node pools
+
+Going with option 2 for now - sites are still contributing ~140+80=220 
+useful slots combined, not worth excluding entirely. Workflows will run 
+slower but not stop.
+
+Filed GGUS-158341 requesting Bari and Legnaro to prioritize EL8 migration
+for at least 500 nodes each within 48 hours.
+
+[A. Perez | 2025-01-08 13:30 UTC]
+T2_IT_Bari admin reports they are accelerating EL8 rollout.
+Batch conversion of EL7 nodes being done in groups of 50.
+Expected: 300 additional EL8 nodes available by end of day.
+
+[F. Cossutti | 2025-01-08 15:00 UTC]
+Progress visible in WMStats:
+  T2_IT_Bari:    Running: 287  (improving, EL8 nodes coming online)
+  T2_IT_Legnaro: Running: 156
+
+[A. Perez | 2025-01-08 16:40 UTC]
+Both sites now at acceptable job counts:
+  T2_IT_Bari:    Running: 641
+  T2_IT_Legnaro: Running: 412
+
+Migration still ongoing but sites are now functionally contributing.
+Closing ticket. GGUS-158341 remains open to track full EL7->EL8 migration.
+
+================================================================================
+RESOLUTION
+================================================================================
+
+Root Cause:
+  T2_IT_Bari and T2_IT_Legnaro still running EL7 OS on majority of worker nodes.
+  CMS production workflows now require EL8 or EL9 (newer CMSSW compatibility).
+  HTCondor pilot/job ClassAd mismatch resulted in pilots landing but not
+  matching any queued jobs, causing effective job starvation despite sites
+  appearing operational.
+
+Impact:
+  ~1,400 CPU slots effectively unavailable for ~7 hours.
+  Multiple Monte Carlo production workflows experienced reduced throughput.
+  No job failures, no data loss.
+
+Fix Applied:
+  Sites prioritized EL8 node migration. ~300 additional EL8 nodes at T2_IT_Bari
+  brought online within 4 hours of ticket creation.
+
+Time to Resolution: 5h 26m (to acceptable throughput)
+
+Follow-up:
+  - GGUS-158341 tracking full EL7->EL8 migration at both sites
+  - CompOps to monitor both sites daily until migration confirmed complete
+  - Propose adding OS platform compatibility to site readiness dashboard

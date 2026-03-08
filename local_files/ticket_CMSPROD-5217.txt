@@ -1,0 +1,174 @@
+================================================================================
+JIRA TICKET: CMSPROD-5217
+================================================================================
+Project:      CMS Production Operations (CMSPROD)
+Title:        Workflow stuck in Acquired - MSTransferor not creating Rucio rules
+Priority:     Medium
+Type:         Investigation
+Reporter:     shift-op-garcia
+Assignee:     shift-op-garcia -> wmcore-dev-team
+Created:      2026-01-19 15:40 UTC
+Last Updated: 2026-01-20 09:12 UTC
+Resolved:     2026-01-20 09:12 UTC
+Status:       Closed
+Labels:       wfmgmt, mstransferor, rucio, acquired-stuck, workflow-management
+Linked:       CMSPROD-5218 (WMCore bug report for MSTransferor rule creation)
+
+================================================================================
+DESCRIPTION
+================================================================================
+
+WorkflowStuckInAcquired alert fired for workflow:
+
+  /cmsunified/ACDC0_task_BPH-Run3Summer23wmLHEGS-00191_0/
+
+Workflow has been in Acquired state for 6.5 hours with no job submissions
+recorded in WMStats. The workflow is a re-submission (ACDC) of a failed
+BPH (B Physics and Hadronic) Monte Carlo production workflow.
+
+WMStats shows the workflow is assigned to wmagent-prod-03.cern.ch (CERN T0/T2)
+with 45,000 pending job units. Zero jobs have been submitted.
+
+CRIC shows T2_CH_CERN as Active with ample capacity. CouchDB replication on
+wmagent-prod-03 appears healthy (last heartbeat 2 minutes ago).
+
+================================================================================
+COMMENTS
+================================================================================
+
+[shift-op-garcia | 2026-01-19 16:05 UTC]
+-----------------------------------------
+Standard investigation for stuck-in-Acquired workflow:
+
+Step 1: Verify WMAgent is healthy
+  curl http://wmagent-prod-03.cern.ch:8240/agent/
+  {"status": "running", "components": {"JobSubmitter": "running",
+  "WorkQueueManager": "running", "AgentStatusPoller": "running"}}
+  Agent is healthy.
+
+Step 2: Check input data availability at target site
+  The workflow requires input dataset:
+    /BPH-Run3Summer23wmLHEGS-00191/GEN-SIM/MINIAODSIM
+  
+  rucio list-rules --account=wma_prod \
+    /BPH-Run3Summer23wmLHEGS-00191/GEN-SIM/MINIAODSIM
+  
+  Output: No rules found.
+
+This is the problem. MSTransferor (the MicroService responsible for creating
+Rucio data placement rules for input datasets) has not created a rule to
+deliver this dataset to T2_CH_CERN. Without a Rucio rule, the data will not
+be transferred and the WMAgent will not submit jobs (it waits for input data
+to be available before submission).
+
+Checking if the dataset exists in DBS3:
+  dasgoclient -query="dataset=/BPH-Run3Summer23wmLHEGS-00191/GEN-SIM/MINIAODSIM"
+  Output: /BPH-Run3Summer23wmLHEGS-00191/GEN-SIM/MINIAODSIM [VALID]
+
+Dataset exists and is valid. So MSTransferor should have created a rule.
+Why didn't it?
+
+[shift-op-garcia | 2026-01-19 16:50 UTC]
+-----------------------------------------
+Investigating MSTransferor logs in Kubernetes:
+
+  kubectl logs ms-transferor-prod-7f8b9d-kxp2q --namespace=wmagent-prod \
+    | grep "BPH-Run3Summer23wmLHEGS-00191" | tail -30
+
+Found relevant log entry:
+  2026-01-19T09:14:23Z INFO MSTransferor Processing workflow 
+    /cmsunified/ACDC0_task_BPH-Run3Summer23wmLHEGS-00191_0/
+  
+  2026-01-19T09:14:24Z WARNING MSTransferor Input dataset 
+    /BPH-Run3Summer23wmLHEGS-00191/GEN-SIM/MINIAODSIM has 0 blocks 
+    at target RSE T2_CH_CERN
+  
+  2026-01-19T09:14:24Z ERROR MSTransferor Rucio rule creation failed: 
+    DID not found: cms:/BPH-Run3Summer23wmLHEGS-00191/GEN-SIM/MINIAODSIM
+  
+  2026-01-19T09:14:24Z INFO MSTransferor Skipping rule creation for workflow 
+    /cmsunified/ACDC0_task_BPH-Run3Summer23wmLHEGS-00191_0/ - will retry next cycle
+
+MSTransferor tried to create a Rucio rule but Rucio reported the DID
+(Data Identifier) does not exist. Yet DBS3 says the dataset is VALID.
+
+There's a consistency issue between DBS3 and Rucio for this dataset.
+Let me check Rucio directly:
+
+  rucio list-dids cms:/BPH-Run3Summer23wmLHEGS-00191/GEN-SIM/MINIAODSIM
+  RucioException: DataIdentifierNotFound: Data identifier 
+    'cms:BPH-Run3Summer23wmLHEGS-00191#block-0001' not found
+
+The dataset is registered in DBS3 but the corresponding DIDs have not been
+registered in Rucio. This is a rare but known failure mode - the DBS3 to
+Rucio synchronization (handled by a separate service called dbs2rucio) failed
+for this dataset. The dataset exists on disk and in DBS3 but Rucio doesn't
+know about it.
+
+Escalating to WMCore development team as this requires manual Rucio DID
+registration which operators are not authorized to do.
+
+[wmcore-dev-pham | 2026-01-19 18:30 UTC]
+-----------------------------------------
+Confirmed the dbs2rucio sync failure. This dataset was registered in DBS3
+on 2026-01-17 but the dbs2rucio sync service had a processing backlog at
+that time due to a large batch of new datasets and this one fell through.
+
+Manually registered the dataset DIDs in Rucio:
+
+  # For each block in DBS3, create corresponding Rucio DID
+  rucio add-dataset cms:/BPH-Run3Summer23wmLHEGS-00191/GEN-SIM/MINIAODSIM
+  
+  # Add all constituent files to the dataset DID
+  # (this required custom script - 14,823 files across 47 blocks)
+  python3 register_dbs_dataset_in_rucio.py \
+    --dataset /BPH-Run3Summer23wmLHEGS-00191/GEN-SIM/MINIAODSIM \
+    --account wma_prod
+
+  Registration complete. 14,823 files, 47 blocks, 3.84 TB.
+
+[shift-op-garcia | 2026-01-20 08:15 UTC]
+-----------------------------------------
+MSTransferor picked up the workflow in its next cycle (cycles every 30 minutes)
+and successfully created the Rucio rule:
+
+  rucio list-rules --account=wma_prod \
+    /BPH-Run3Summer23wmLHEGS-00191/GEN-SIM/MINIAODSIM
+  
+  ID: a7f3b2c1d4e5...  STATE: REPLICATING  RSE: T2_CH_CERN  ACCOUNT: wma_prod
+
+Rucio is now transferring the dataset. 3.84 TB at ~600 MB/s average.
+Estimated completion: ~1h 50m.
+
+[shift-op-garcia | 2026-01-20 09:12 UTC]
+-----------------------------------------
+Data transfer complete. Rucio rule state: OK.
+
+WMAgent submitted first jobs 8 minutes after transfer completion.
+WMStats shows 847 jobs running for this workflow at T2_CH_CERN.
+
+Closing ticket.
+
+================================================================================
+RESOLUTION
+================================================================================
+Root Cause:    The dbs2rucio synchronization service failed to register this
+               dataset in Rucio after it was added to DBS3 on 2026-01-17.
+               MSTransferor attempted to create a Rucio rule but failed because
+               the dataset DID was unknown to Rucio. MSTransferor then silently
+               skipped the workflow rather than raising an alert, leaving it
+               stuck in Acquired state indefinitely.
+
+Fix Applied:   WMCore dev team manually registered dataset DIDs in Rucio.
+               MSTransferor successfully created transfer rule on next cycle.
+               Data transferred and jobs resumed.
+
+Time to Detect:    6.5 hours (alert threshold is 3 hours - alert was delayed
+                   because the workflow had only recently crossed the threshold)
+Time to Resolve:   17h 32m (including overnight delay waiting for dev team)
+Data Impact:       No data loss. One BPH MC workflow delayed by ~18 hours.
+
+Prevention:    CMSPROD-5218 filed to: (1) add alerting to MSTransferor when
+               rule creation fails for a workflow, (2) investigate dbs2rucio
+               backlog handling to prevent future sync failures.
+================================================================================

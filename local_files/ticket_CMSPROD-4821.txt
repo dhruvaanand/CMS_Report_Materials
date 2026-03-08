@@ -1,0 +1,168 @@
+================================================================================
+JIRA TICKET: CMSPROD-4821
+================================================================================
+Project:      CMS Production Operations (CMSPROD)
+Title:        WMAgent at T2_US_MIT not submitting jobs - stuck in Draining state
+Priority:     High
+Type:         Incident
+Reporter:     shift-op-rodriguez
+Assignee:     shift-op-rodriguez -> compops-oncall-sharma
+Created:      2025-11-14 08:32 UTC
+Last Updated: 2025-11-14 11:47 UTC
+Resolved:     2025-11-14 11:47 UTC
+Status:       Closed
+Labels:       wmagent, couchdb, t2, draining, disk-full
+Linked:       CMSPROD-4822 (follow-up: automated CouchDB index cleanup)
+
+================================================================================
+DESCRIPTION
+================================================================================
+
+Observed during routine shift monitoring at 08:30 UTC. WMStats dashboard shows
+T2_US_MIT with 0 running jobs for the past 2.5 hours, despite having ~12,400
+pending job units assigned from the Global WorkQueue.
+
+Site status in CRIC shows T2_US_MIT as Active with 4,500 CPU slots available
+and no planned maintenance windows registered. No corresponding GGUS ticket
+found for T2_US_MIT.
+
+WMAgent heartbeat in WMStats last updated at 05:58 UTC, approximately 2.5 hours
+ago. Agent appears to have gone silent around that time. WMStats agent status
+panel shows: STATE=Draining.
+
+Affected workflows include:
+  - /TTJets_TuneCP5_13p6TeV-amcatnloFXFX-pythia8/Run3Summer23DR-130X/GEN-SIM-RAW
+  - /QCD_Pt-15to7000_TuneCP5_Flat_13p6TeV/Run3Summer23DR-130X/GEN-SIM-RAW
+  - /DYJetsToLL_M-50_TuneCP5_13p6TeV-amcatnloFXFX/Run3Summer23MiniAODv4/MINIAODSIM
+
+No other sites appear affected. Global job rate is nominally healthy.
+
+================================================================================
+COMMENTS
+================================================================================
+
+[shift-op-rodriguez | 2025-11-14 08:45 UTC]
+--------------------------------------------
+Checked WMAgent logs via Kubernetes pod console. Found repeated error in the
+AgentStatusPoller thread starting at 05:54 UTC:
+
+  2025-11-14T05:54:12Z ERROR WMCore.Agent.HeartbeatAPI Could not connect to
+  CouchDB at http://couch-internal.t2.mit.edu:5984/
+  ConnectionRefusedError: [Errno 111] Connection refused
+
+  2025-11-14T05:54:12Z ERROR WMCore.WorkQueue.WorkQueueBackend Failed to update
+  work unit status: CouchDB unavailable
+
+  2025-11-14T05:54:13Z WARNING WMCore.Agent.Daemon CouchDB unreachable for 3
+  consecutive polls. Transitioning agent to Draining state as safety measure.
+
+This confirms the agent entered Draining automatically - this is expected
+behaviour when CouchDB connectivity is lost. The agent will not accept new work
+and will not submit new jobs until CouchDB is restored and the agent is manually
+recovered.
+
+The CouchDB instance local to the WMAgent at T2_US_MIT is at
+couch-internal.t2.mit.edu:5984 - this is the site-local replica that replicates
+with the central CouchDB at CERN.
+
+Attempting to reach CouchDB directly:
+  curl -s http://couch-internal.t2.mit.edu:5984/
+  curl: (7) Failed to connect to couch-internal.t2.mit.edu port 5984: 
+  Connection refused
+
+CouchDB service is definitely down. Contacting T2_US_MIT site admin.
+
+[shift-op-rodriguez | 2025-11-14 09:05 UTC]
+--------------------------------------------
+Reached T2_US_MIT site admin J. Kowalski via Mattermost (@jkowalski-mit).
+Kowalski checked the CouchDB server and confirmed:
+
+  "CouchDB crashed at ~05:52 UTC. /var/lib/couchdb partition is 100% full.
+   du -sh shows 847GB used out of 850GB allocated. The bulk of this is in
+   .couch view index files under /var/lib/couchdb/.shards/. These are stale
+   view indexes that were never compacted. CouchDB cannot write its lock file
+   on startup so it refuses to start."
+
+Root cause confirmed: disk exhaustion due to uncompacted CouchDB view indexes.
+This is a known operational risk - CouchDB accumulates view index files over
+time and requires periodic compaction, which was not automated at this site.
+
+[compops-oncall-sharma | 2025-11-14 09:45 UTC]
+-----------------------------------------------
+Coordinating with J. Kowalski on disk cleanup. Steps taken by site admin:
+
+  1. Identified stale view index files:
+     find /var/lib/couchdb/.shards/ -name "*.couch" -mtime +30 | du -sh
+     Output: 203GB in files older than 30 days
+
+  2. Deleted stale view indexes (after verifying these are compactable):
+     find /var/lib/couchdb/.shards/ -name "*.couch" -mtime +30 -delete
+
+  3. Also cleared old CouchDB log files:
+     find /var/log/couchdb/ -name "*.log" -mtime +7 -delete
+     Freed additional 18GB
+
+  4. Total space freed: ~221GB. Partition now at 72% utilization.
+
+  5. Restarted CouchDB service:
+     systemctl restart couchdb
+     
+  6. Verified CouchDB responding:
+     curl -s http://couch-internal.t2.mit.edu:5984/
+     {"couchdb":"Welcome","version":"3.3.2","git_sha":"...","uuid":"..."}
+
+CouchDB is up. Now need to recover the WMAgent.
+
+[compops-oncall-sharma | 2025-11-14 10:15 UTC]
+-----------------------------------------------
+Triggered WMAgent recovery. Steps:
+
+  1. Verified CouchDB replication is re-establishing:
+     curl -s http://couch-internal.t2.mit.edu:5984/_active_tasks | python -m json.tool
+     Shows 4 active replication tasks with T2_US_MIT as source/target.
+     Replication lag: ~2.5 hours of changes to catch up.
+
+  2. While waiting for replication to catch up, checked HTCondor queue at MIT:
+     condor_q -name condor.t2.mit.edu | grep CMS
+     Queue shows 0 CMS jobs (expected - agent was draining).
+
+  3. Triggered agent reconfiguration via WMAgent REST API:
+     curl -X POST http://wmagent-prod.t2.mit.edu:8240/agent/reconfigure \
+       -H "Content-Type: application/json" \
+       -d '{"team": "production", "status": "running"}'
+     Response: {"result": "success", "agent_state": "running"}
+
+  4. Watched WMStats - agent heartbeat resumed within 2 minutes.
+     Agent state transitioned: Draining -> Running
+
+  5. After 15 minutes: WMStats shows 312 jobs submitted and running at T2_US_MIT.
+
+[shift-op-rodriguez | 2025-11-14 11:47 UTC]
+--------------------------------------------
+T2_US_MIT fully recovered. Current status:
+  - Running jobs: 2,847
+  - Pending jobs: 9,553 (draining from backlog)
+  - Agent state: Running
+  - CouchDB: Healthy, replication caught up
+
+All three affected workflows are progressing normally. Closing ticket.
+
+Follow-up action: opening CMSPROD-4822 to track implementation of automated
+CouchDB view compaction at all T2 sites to prevent recurrence.
+
+================================================================================
+RESOLUTION
+================================================================================
+Root Cause:    CouchDB view index disk exhaustion at T2_US_MIT caused CouchDB
+               to crash, triggering automatic WMAgent Draining as a safety measure.
+
+Fix Applied:   Site admin cleared 221GB of stale CouchDB view index and log files.
+               CouchDB restarted. WMAgent recovered via REST API reconfiguration.
+
+Time to Detect:    ~2.5 hours (agent went silent at 05:52, noticed at 08:30)
+Time to Resolve:   3h 15m from ticket open to full recovery
+Data Impact:       ~30,000 job-hours of production lost during downtime
+
+Prevention:    CMSPROD-4822 - implement cron-based CouchDB view compaction at
+               all T2 sites with monitoring alert if disk >80%.
+================================================================================

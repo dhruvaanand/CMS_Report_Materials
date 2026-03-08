@@ -1,0 +1,148 @@
+================================================================================
+CMS CompOps Shift Handover Note
+================================================================================
+Outgoing Shift:   UTC 00:00 - 08:00
+Incoming Shift:   UTC 08:00 - 16:00
+Date:             2026-02-03
+Outgoing Op:      shift-op-petrov (JINR)
+Incoming Op:      shift-op-okonkwo (FNAL)
+Written:          2026-02-03 07:45 UTC
+
+================================================================================
+OVERALL SYSTEM STATUS
+================================================================================
+  Global job rate:        ~420,000 jobs/hour  [NOMINAL - baseline ~400k]
+  Active workflows:       312 (284 Running, 21 Acquired, 7 Completed-pending-closeout)
+  Transfer rate:          1.2 PB/day           [NOMINAL]
+  Sites active:           148 / 170 total
+  Open P1/P2 tickets:     2 (see OPEN ISSUES below)
+
+System is generally healthy. Two issues require follow-up from incoming shift.
+
+================================================================================
+OPEN ISSUES REQUIRING ATTENTION
+================================================================================
+
+ISSUE 1 [MEDIUM PRIORITY] - T2_RU_JINR underperforming
+--------------------------------------------------------
+Ticket: CMSPROD-5298 (opened 02:14 UTC)
+Status: MONITORING
+
+T2_RU_JINR has had elevated job failure rate since ~01:30 UTC:
+  Current failure rate: 28% (baseline ~6%)
+  Jobs affected: ~1,200 currently running
+
+Investigated at 02:30 UTC. FWJRs show mixed errors:
+  - 60% of failures: "Cannot connect to XRootD server xrootd.jinr.ru:1094"
+  - 40% of failures: Normal exit code 0 completions (these are fine, not actually failures)
+
+The XRootD connection failures suggest the site's local storage server is
+having intermittent connectivity issues. Filed GGUS-159041 against T2_RU_JINR
+at 03:00 UTC. No response from site admin yet (may be outside their working hours
+given time zone).
+
+INCOMING ACTION: 
+  - Check if GGUS-159041 has received a response
+  - Monitor failure rate. If it exceeds 40%, recommend excluding T2_RU_JINR
+    from production assignment via Unified until resolved
+  - If site admin unresponsive by 12:00 UTC, escalate GGUS ticket to high priority
+
+ISSUE 2 [LOW PRIORITY] - 3 workflows stuck in Acquired for 2.5 hours
+----------------------------------------------------------------------
+Ticket: CMSPROD-5301 (opened 05:30 UTC)
+Status: UNDER INVESTIGATION
+
+Three /QCD_Pt_*/Run3Summer23MiniAODv4/ MINIAODSIM workflows assigned to
+wmagent-prod-07.cern.ch are at 2.5 hours in Acquired state, 0 jobs submitted.
+
+Initial check:
+  - WMAgent-07 is healthy and Running
+  - Input datasets verified in DBS3 as VALID
+  - Rucio rules checked: all three datasets have rules in state REPLICATING
+    at T2_CH_CERN (transfer ongoing, ~65% complete, ETA ~3.5 hours from now)
+
+These are NOT stuck - they are waiting for data transfer to complete before
+submitting jobs. This is normal MSTransferor behaviour. Expected to start
+submitting around 11:30 UTC.
+
+INCOMING ACTION:
+  - Monitor at 12:00 UTC. If still 0 jobs at that point (1.5 hours after
+    transfers should complete), escalate to full stuck-workflow investigation.
+  - No immediate action required.
+
+================================================================================
+COMPLETED DURING SHIFT
+================================================================================
+
+ACTION 1 - Closed CMSPROD-5287: T2_US_Purdue recovered
+--------------------------------------------------------
+T2_US_Purdue had been excluded from production since 2026-01-31 (CMSPROD-5287)
+due to high memory-kill job failure rate. Site admin identified and fixed a
+misconfigured memory cgroup limit on their worker nodes at 23:30 UTC yesterday.
+
+Ran test workflow (/MinBias_TuneCP5_13p6TeV-pythia8/Run3Summer23DR-Test-test1/)
+with 100 jobs limited to T2_US_Purdue. All 100 jobs completed successfully.
+Re-enabled T2_US_Purdue in Unified at 01:15 UTC. Currently running 2,340 jobs,
+failure rate 3.2% (normal). CMSPROD-5287 closed.
+
+ACTION 2 - Manual ACDC submission for BPH workflow
+----------------------------------------------------
+Physics group (BPH PAG) requested re-submission of failed job units from:
+  /BPH-Run3Summer23wmLHEGS-00217/GEN-SIM-RAW/
+
+A subset of jobs (~4,200 / 450,000 total) failed at T2_FR_GRIF_LLR last week
+due to a temporary storage issue. Created ACDC workflow via Unified at 04:30 UTC:
+  /cmsunified/ACDC0_task_BPH-Run3Summer23wmLHEGS-00217_0/
+
+ACDC workflow is now Acquired and should start submitting jobs once MSTransferor
+creates the necessary Rucio rules (expected within 1 hour). No further action
+needed unless it gets stuck (see Issue 2 pattern above).
+
+ACTION 3 - Responded to GGUS-158991 (T1_ES_PIC storage alarm)
+--------------------------------------------------------------
+T1_ES_PIC reported storage quota alarm on their castor disk pool. Investigated
+Rucio rules pointing to T1_ES_PIC - found 3 large datasets with REPLICATING
+rules that were filling the disk. Contacted MSRuleCleaner team to expedite
+cleanup of outdated rules at T1_ES_PIC. Rules being cleaned now. T1_ES_PIC
+storage back to 78% utilization. GGUS-158991 updated.
+
+================================================================================
+SITES TO WATCH
+================================================================================
+
+T2_RU_JINR         DEGRADED - see Issue 1 above
+T2_BR_SPRACE       WATCH - intermittent network issues last 48h, currently OK
+T2_KR_KNU          WATCH - site reported planned network maintenance 10:00-12:00 UTC
+                            today. Jobs may fail during that window. Site admin
+                            will drain WMAgent manually before maintenance starts.
+
+================================================================================
+USEFUL LINKS (SHIFT REFERENCE)
+================================================================================
+WMStats:              http://cms-wmstats.cern.ch/wmstats/
+Unified:              http://cms-unified.cern.ch/
+CRIC:                 https://cms-cric.cern.ch/
+Rucio WebUI:          https://cms-rucio-webui.cern.ch/
+FTS Monitor:          https://fts3.cern.ch/ftsmon/
+GGUS:                 https://ggus.eu/
+GlideinWMS:           https://cms-gwms.fnal.gov/
+Mattermost CompOps:   #compops-ops, #compops-transfers, #compops-oncall
+JIRA CompOps:         https://its.cern.ch/jira/projects/CMSPROD
+JIRA Transfers:       https://its.cern.ch/jira/projects/CMSTRANSF
+
+================================================================================
+NOTES FOR INCOMING SHIFT
+================================================================================
+- LHC is in technical stop this week, so no raw data taking. Production focus
+  is entirely on Monte Carlo simulation and re-reconstruction of Run 3 data.
+  
+- The Run3Summer23MiniAODv4 campaign is in final production push. There are
+  ~140 active workflows from this campaign. Priority is high - physics analysis
+  groups are waiting for these datasets for upcoming conference results.
+
+- If you have questions, I am online until 10:00 UTC (ISK timezone) and can
+  be reached on Mattermost @petrov-jinr.
+
+Good luck on your shift!
+- A. Petrov
+================================================================================

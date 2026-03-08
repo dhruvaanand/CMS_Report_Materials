@@ -1,0 +1,165 @@
+================================================================================
+JIRA TICKET: CMSPROD-5103
+================================================================================
+Project:      CMS Production Operations (CMSPROD)
+Title:        High job failure rate at T2_IT_Bari and T2_IT_Rome - CVMFS error
+Priority:     High
+Type:         Incident
+Reporter:     shift-op-chen
+Assignee:     shift-op-chen
+Created:      2026-01-08 11:14 UTC
+Last Updated: 2026-01-08 14:55 UTC
+Resolved:     2026-01-08 14:55 UTC
+Status:       Closed
+Labels:       cvmfs, job-failures, t2, italy, cmssw
+Linked:       GGUS-158203 (site ticket against T2_IT_Bari)
+              GGUS-158204 (site ticket against T2_IT_Rome)
+
+================================================================================
+DESCRIPTION
+================================================================================
+
+SiteJobFailureRateHigh alert fired at 11:14 UTC for both T2_IT_Bari and T2_IT_Rome
+simultaneously. This simultaneous firing at two geographically co-located Italian
+sites suggests a shared infrastructure issue rather than independent site problems.
+
+Failure rates:
+  T2_IT_Bari:  78% job failure rate (past 1 hour), baseline ~4%
+  T2_IT_Rome:  71% job failure rate (past 1 hour), baseline ~5%
+
+Combined running jobs affected: ~4,200
+
+Preliminary FWJR (Framework Job Report) examination shows jobs failing at
+the CMSSW initialization stage with errors referencing CVMFS paths:
+
+  Exception Message:
+  cms::Exception caught in EventProcessor and rethrown
+  cms::Exception Go through:
+  ----- Begin Fatal Exception 08-Jan-2026 11:03:58 UTC--------------------------
+  Fatal Root Error:
+    TCling::LoadPCM: Cannot find PCM
+    /cvmfs/cms.cern.ch/el8_amd64_gcc12/cms/cmssw/CMSSW_14_0_7/lib/
+    el8_amd64_gcc12/libFWCoreFramework_rflx.pcm
+  ----- End Fatal Exception -----------------------------------------------------
+
+The CMSSW library files are not accessible via CVMFS on the worker nodes.
+This is a CVMFS availability issue, not a software bug.
+
+================================================================================
+COMMENTS
+================================================================================
+
+[shift-op-chen | 2026-01-08 11:28 UTC]
+---------------------------------------
+Investigating CVMFS status at the Italian sites.
+
+CVMFS serves CMS software (CMSSW) to worker nodes via a content-addressed
+distributed filesystem. Worker nodes mount /cvmfs/cms.cern.ch and access
+CMSSW installations on demand. If CVMFS is degraded or unavailable at a site,
+jobs fail immediately on startup since they cannot find the CMSSW libraries.
+
+The fact that both T2_IT_Bari and T2_IT_Rome are affected simultaneously
+strongly suggests either:
+  a) A shared CVMFS Stratum-1 server that both sites use is having issues, or
+  b) A network issue between Italy and the CVMFS infrastructure
+
+Checked CVMFS monitoring at https://wlcg-mon.cern.ch/cvmfs/:
+  cms.cern.ch Stratum-1 servers:
+    cvmfs-stratum1.cern.ch      - OK (RTT: 2ms)
+    cvmfs-stratum1.fnal.gov     - OK (RTT: 108ms)  
+    cvmfs-stratum1.infn.it      - DEGRADED (last update: 4h 32m ago)
+    cvmfs-stratum1.bnl.gov      - OK (RTT: 95ms)
+
+Found it. cvmfs-stratum1.infn.it is the Italian Stratum-1 CVMFS server,
+operated by INFN (Istituto Nazionale di Fisica Nucleare). It serves Italian
+T2 sites by default due to geographic proximity. The server has not synced
+with Stratum-0 (the master at CERN) for over 4 hours.
+
+Italian T2 sites configured to preferentially use cvmfs-stratum1.infn.it
+are serving stale or incomplete CVMFS content, causing jobs to fail when
+they try to access CMSSW library files that were recently updated.
+
+Filed GGUS tickets GGUS-158203 and GGUS-158204 against the two sites and
+separately notified INFN grid operations about the Stratum-1 issue.
+
+[shift-op-chen | 2026-01-08 12:05 UTC]
+---------------------------------------
+INFN grid operations responded - the cvmfs-stratum1.infn.it server had a
+disk controller failure at ~06:30 UTC which caused the sync daemon to crash.
+The failure was not caught by monitoring because the server was still
+responding to client connections (serving cached content) even though it
+was not updating.
+
+This is a known failure mode for CVMFS Stratum-1: the server can appear
+healthy to clients while being unable to sync from upstream.
+
+Interim mitigation: contacted T2_IT_Bari and T2_IT_Rome site admins to
+reconfigure their CVMFS client to use cvmfs-stratum1.cern.ch as priority
+instead of the INFN Stratum-1.
+
+CVMFS client reconfiguration on worker nodes at T2_IT_Bari:
+  Edit /etc/cvmfs/domain.d/cern.ch.conf:
+  CVMFS_SERVER_URL="http://cvmfs-stratum1.cern.ch/cvmfs/@org@;
+                    http://cvmfs-stratum1.fnal.gov/cvmfs/@org@"
+  
+  Then reload on all worker nodes:
+  cvmfs_config reload cms.cern.ch
+
+T2_IT_Bari admin executing this now across their worker node pool (~800 nodes).
+T2_IT_Rome admin doing the same (~650 nodes).
+
+[shift-op-chen | 2026-01-08 13:20 UTC]
+---------------------------------------
+CVMFS reconfiguration complete at both sites.
+
+Verified CVMFS access is restored by checking a worker node at T2_IT_Bari:
+  ls /cvmfs/cms.cern.ch/el8_amd64_gcc12/cms/cmssw/CMSSW_14_0_7/lib/
+  -> Successfully lists library files including the PCM files that were failing
+
+New jobs submitted after the reconfiguration are succeeding.
+Job failure rate dropping:
+  T2_IT_Bari: 78% -> 34% (jobs submitted before fix still in queue/failing)
+  T2_IT_Rome: 71% -> 28%
+
+Should return to baseline as the pre-fix jobs drain from the queue over
+the next 30-45 minutes.
+
+[shift-op-chen | 2026-01-08 14:55 UTC]
+---------------------------------------
+Both sites fully recovered.
+  T2_IT_Bari job failure rate: 3.8% (within normal baseline)
+  T2_IT_Rome job failure rate: 4.2% (within normal baseline)
+
+INFN has confirmed the Stratum-1 server disk controller has been replaced
+and syncing has resumed. The server will be restored as the primary Stratum-1
+for Italian sites once it has fully caught up (estimated 2-3 hours).
+
+Total failed jobs: ~3,200 across both sites during the 3-hour incident.
+WMAgent automatic retry will resubmit these jobs. No manual intervention
+required for the failed jobs.
+
+Closing ticket. GGUS tickets GGUS-158203 and GGUS-158204 also closed.
+
+================================================================================
+RESOLUTION
+================================================================================
+Root Cause:    Disk controller failure on cvmfs-stratum1.infn.it (INFN Stratum-1
+               CVMFS server) caused the sync daemon to crash at ~06:30 UTC.
+               The server continued serving stale cached content to Italian T2
+               sites while silently failing to update from upstream Stratum-0.
+               Jobs at T2_IT_Bari and T2_IT_Rome failed when they tried to
+               access recently-updated CMSSW library files not present in the
+               stale cache.
+
+Fix Applied:   Italian T2 sites reconfigured to use cvmfs-stratum1.cern.ch
+               as primary CVMFS Stratum-1 while INFN server was repaired.
+               INFN replaced disk controller and restored full Stratum-1 service.
+
+Time to Detect:    ~44 minutes from first failures to alert (failure rate threshold)
+Time to Resolve:   3h 41m from ticket open to full recovery at both sites
+Data Impact:       ~3,200 jobs failed and required retry. ~12,600 job-hours lost.
+                   No data loss. All workflows continued with automatic retries.
+
+Prevention:    Improve CVMFS Stratum-1 monitoring to detect sync lag independently
+               of client connectivity. Consider adding sync-lag alert at >1 hour.
+================================================================================

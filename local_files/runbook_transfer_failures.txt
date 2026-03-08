@@ -1,0 +1,314 @@
+================================================================================
+CMS CompOps: Transfer Failure Investigation Procedure
+================================================================================
+Version:      2.4
+Last Updated: 2025-11-20
+Authors:      CMS CompOps Transfers Sub-team
+TWiki Source: https://twiki.cern.ch/twiki/bin/view/CMS/CompOpsTransferFailures
+
+This document describes the standard procedure for investigating and resolving
+Rucio data transfer failures. Transfer issues are among the most frequent
+operational problems in CMS Computing Operations.
+
+================================================================================
+BACKGROUND: HOW CMS DATA TRANSFERS WORK
+================================================================================
+
+When a workflow needs input data at a computing site, the following chain
+of events occurs:
+
+  1. MSTransferor identifies that workflow W needs dataset D at site S
+  2. MSTransferor creates a Rucio rule: "Keep 1 copy of D at RSE S"
+  3. Rucio determines which files need to be copied (not already at S)
+  4. Rucio creates FTS transfer jobs for each file
+  5. FTS authenticates with source and destination storage endpoints
+  6. FTS transfers files using GridFTP or XRootD protocol
+  7. FTS reports completion back to Rucio
+  8. Rucio marks files as available at S, rule state -> OK
+  9. WMAgent sees data available, begins submitting jobs
+
+Failures can occur at any step. This runbook focuses on steps 4-7 (FTS failures),
+which account for ~90% of transfer issues.
+
+================================================================================
+SECTION 1: DETECTING TRANSFER FAILURES
+================================================================================
+
+1.1 Alert-Driven Detection
+---------------------------
+The RucioTransferFailureSpike alert fires when a site-pair failure rate
+exceeds 20% for 15 minutes. The alert identifies:
+  - Source RSE (e.g., T1_DE_KIT)
+  - Destination RSE (e.g., T2_CH_CERN)
+  - Current failure rate and file count
+
+1.2 Proactive Detection During Shifts
+--------------------------------------
+Check Rucio ConMon dashboard: https://monit-grafana.cern.ch/rucio-conmon/
+
+Look for:
+  - Transfer queues growing without draining (SUBMITTING files accumulating)
+  - Rules stuck in REPLICATING state for >24 hours
+  - Sites with significantly lower incoming transfer rates than expected
+
+1.3 Workflow-Driven Detection
+------------------------------
+If a workflow is stuck in Acquired state and MSTransferor logs show a rule
+was created but in STUCK state:
+  rucio rule-info <rule-id>
+  
+  State: STUCK indicates transfers are failing and Rucio has given up retrying.
+
+================================================================================
+SECTION 2: CHARACTERIZING THE FAILURE
+================================================================================
+
+2.1 Get the Error Message
+--------------------------
+Error messages from FTS are the most direct diagnostic tool.
+
+Via FTS WebUI (recommended for single site-pair investigation):
+  1. Navigate to: https://fts3.cern.ch/ftsmon/
+  2. Filter by Source Storage and Destination Storage
+  3. Click on a failed transfer to see full error details
+
+Via Rucio CLI (for programmatic access):
+  rucio list-requests --src-rse=<SOURCE_RSE> --dst-rse=<DEST_RSE> \
+    --state=FAILED | head -20
+
+  For details on a specific failed transfer:
+  rucio request-info <request-id>
+
+2.2 Classify the Error
+-----------------------
+Match the error message to the categories below:
+
+AUTHENTICATION ERRORS (most common):
+  "530 Login incorrect"
+  "530-Login incorrect. CRL is not found or out of date"
+  "530 End."
+  "Authentication failure"
+  "proxy expired"
+  -> Cause: Grid proxy credential expired or invalid at source site
+  -> Go to Section 3.1
+
+NETWORK ERRORS:
+  "No route to host"
+  "Connection timed out" 
+  "Connection refused"
+  "Network is unreachable"
+  "SSL handshake failed"
+  -> Cause: Network connectivity issue between sites
+  -> Go to Section 3.2
+
+STORAGE ERRORS:
+  "No space left on device"
+  "Disk quota exceeded"
+  "Permission denied" (when writing)
+  "ENOSPC"
+  -> Cause: Destination storage full or quota exceeded
+  -> Go to Section 3.3
+
+SOURCE FILE ERRORS:
+  "No such file or directory"
+  "File not found"
+  "Source file does not exist"
+  -> Cause: File registered in Rucio but not physically present at source
+  -> Go to Section 3.4
+
+PROTOCOL ERRORS:
+  "GridFTP control channel timeout"
+  "XRootD connection timed out during transfer"
+  "Checksum mismatch"
+  -> Cause: Network degradation or source storage performance issues
+  -> Go to Section 3.5
+
+2.3 Determine Scope
+--------------------
+Answer these questions to scope the issue before diving into fixes:
+
+Q: Is only one direction affected (A->B failing, B->A OK)?
+   -> Issue is at the source (proxy, source network, source storage)
+
+Q: Are multiple sources failing to the same destination?
+   -> Issue is at the destination RSE
+
+Q: Are multiple destinations failing from the same source?
+   -> Issue is at the source RSE or source site
+
+Q: Is the failure rate 100% or partial?
+   -> 100%: likely authentication or complete network failure
+   -> Partial: likely network degradation or intermittent storage issues
+
+================================================================================
+SECTION 3: ROOT CAUSE RESOLUTION
+================================================================================
+
+3.1 Authentication / Proxy Credential Failures
+-----------------------------------------------
+The FTS service at the source site uses a grid proxy credential to authenticate
+with destination storage endpoints. These credentials have limited lifetimes
+(typically 7 days) and must be renewed automatically.
+
+Step 1: Verify proxy is expired
+  Contact the source site admin or check via MyProxy if accessible:
+    myproxy-info -s <myproxy-server-hostname> -l fts-cms-<site>
+  
+  The output shows the proxy expiry time. If expired: proceed to step 2.
+
+Step 2: Determine why renewal failed
+  Common reasons:
+    a) MyProxy server hostname changed (infrastructure migration)
+       Check if the cron script has the current server hostname
+    
+    b) MyProxy credentials themselves expired (long-running failure)
+       Requires manual bootstrap by site admin with valid personal certificate
+    
+    c) Cron job disabled or broken
+       Site admin needs to re-enable and fix the renewal cron
+
+Step 3: File CMSTRANSF JIRA ticket and GGUS ticket
+  Always open a CMSTRANSF ticket for any proxy expiry incident.
+  File GGUS against the site if proxy has been expired for >1 hour.
+  
+  Include in ticket:
+    - Which site-pair is affected
+    - Error message from FTS
+    - Time of first failure (from FTS logs)
+    - Estimated volume of blocked transfers
+
+Step 4: Once site admin renews proxy
+  Verify manually that transfers work:
+    gfal-ls gsiftp://<destination-storage>/<path>
+    gfal-copy gsiftp://<source>/testfile gsiftp://<destination>/testfile
+  
+  Then reset stuck Rucio transfers:
+    rucio-admin transfer reset --source-rse=<SOURCE> \
+      --dest-rse=<DEST> --state=FAILED
+
+Step 5: Monitor recovery
+  FTS transfer rate should recover within ~15 minutes.
+  Monitor Rucio ConMon and FTS dashboard until failure rate returns to baseline.
+
+3.2 Network Connectivity Failures
+-----------------------------------
+Step 1: Determine if transient or persistent
+  Check the start time of failures. Network issues lasting <30 minutes
+  are often transient and may self-resolve.
+
+Step 2: Check network monitoring
+  WLCG network monitoring: https://ggus.eu/index.php?mode=monitoring_wlcg
+  CERN network monitoring: https://network.cern.ch/sc/
+
+Step 3: Test connectivity manually
+  From a machine at the source site (ask site admin):
+    ping <destination-storage-hostname>
+    traceroute <destination-storage-hostname>
+  
+  This identifies where the network path breaks.
+
+Step 4: If issue persists >30 minutes
+  File GGUS tickets against affected sites.
+  Contact CMS network support: network-support@cern.ch
+
+Step 5: Temporary mitigation
+  If one site-pair has persistent network issues and data is available
+  elsewhere, consider:
+    rucio-admin rule --rule-id=<stuck-rule-id> --rse-expression=<alternate-rse>
+  This redirects the transfer rule to use an alternate source site.
+
+3.3 Destination Storage Full
+-----------------------------
+Step 1: Check storage utilization
+  In CRIC: https://cms-cric.cern.ch/
+  Find the destination site and check "Free Space" for the relevant RSE.
+
+Step 2: Check for old data that can be removed
+  rucio list-rules --rse=<DEST_RSE> --account=wma_prod
+  
+  Look for rules on completed workflow datasets that are no longer needed.
+  MSRuleCleaner should handle this automatically, but may be backlogged.
+
+Step 3: Contact site admin
+  Notify them of the storage alarm. They may have additional scratch space
+  that can be made available.
+
+Step 4: Escalate large-scale issues
+  If the site is consistently full and blocking significant production:
+  escalate to CMS Computing Coordinator to discuss resource allocation.
+
+3.4 Source File Not Found
+--------------------------
+This is a Rucio consistency issue - Rucio's database says a file is at a
+source RSE, but the file is not physically present there.
+
+Step 1: Verify the file is actually missing
+  Ask source site admin to check physical storage:
+    xrdfs <storage-endpoint> ls <file-path>
+  
+  If file is missing: this is a real consistency error.
+
+Step 2: Check Rucio ConMon consistency reports for this RSE
+  ConMon may already have detected and flagged this inconsistency.
+
+Step 3: Force Rucio to re-transfer from alternate source
+  rucio-admin rule --rule-id=<rule-id> --rse-expression="<alternate source RSE>"
+  
+  This forces Rucio to find the file at an alternate site.
+
+Step 4: File GGUS against the source site
+  Include the list of missing files and their expected paths.
+
+3.5 Protocol / Checksum Errors
+--------------------------------
+Step 1: Check if the error is reproducible
+  Test a manual transfer of the same file to the same destination.
+  Intermittent checksum errors may indicate hardware issues on storage.
+
+Step 2: Check source storage health
+  Contact source site admin to check storage system health (disk errors, etc.)
+
+Step 3: If checksum errors are systematic
+  The source files may be corrupt. Check file integrity in DBS3.
+  Escalate to physics data quality team if files are suspect.
+
+================================================================================
+SECTION 4: AFTER RECOVERY - VERIFYING TRANSFER RESUMPTION
+================================================================================
+
+4.1 Check FTS Transfer Rate
+-----------------------------
+  In FTS monitor, the transfer rate for the affected site-pair should return
+  to its normal throughput within 15-30 minutes of fixing the root cause.
+
+4.2 Check Rucio Rule States
+-----------------------------
+  rucio list-rules --account=wma_prod | grep <affected-site>
+  
+  Rules should transition from STUCK/REPLICATING to OK as files complete.
+
+4.3 Verify Affected Workflows are Unblocked
+--------------------------------------------
+  Check WMStats for workflows that were waiting on this data.
+  Job submission should resume within 30-60 minutes of data becoming available.
+
+4.4 Close JIRA and GGUS Tickets
+---------------------------------
+  Update the CMSTRANSF ticket with:
+    - Root cause confirmed
+    - Fix applied
+    - Time to resolution
+    - Number of files and volume affected
+    - Any prevention recommendations
+  
+  Update GGUS ticket with final resolution status.
+
+================================================================================
+RELATED DOCUMENTS
+================================================================================
+  - Runbook: Stuck Workflows (for workflows waiting on transfer data)
+  - Runbook: Site Exclusion and Reintegration
+  - Rucio User Guide: https://rucio.cern.ch/documentation/
+  - FTS User Guide: https://fts3-docs.web.cern.ch/
+  - Alert Reference: RucioTransferFailureSpike
+================================================================================

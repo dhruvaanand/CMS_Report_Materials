@@ -1,0 +1,133 @@
+================================================================================
+CMS COMPOPS SHIFT HANDOVER LOG
+================================================================================
+Date: 2026-01-15
+Shift: 08:00 - 16:00 UTC
+Outgoing Operator: L. Giannini (lgiannini)
+Incoming Operator: K. Oussoren (koussoren)
+================================================================================
+
+OVERALL STATUS: YELLOW - see T1_ES_PIC issue below
+
+--------------------------------------------------------------------------------
+PRODUCTION OVERVIEW (as of 15:45 UTC)
+--------------------------------------------------------------------------------
+
+Global job counts (WMStats):
+  Total Running:   487,341
+  Total Pending:   1,203,445
+  Total Failed:    12,847  (last 24h)
+
+Site summary - all T1s nominal except T1_ES_PIC (see below).
+Notable T2 underperformers:
+  T2_BR_SPRACE: Running 89 (normal ~400). Site admin aware, power issue
+                in one building. Expected recovery ~18:00 UTC.
+  T2_KR_KISTI:  Running 210 (normal ~350). Network degradation reported
+                to site admin, no ETA yet.
+
+Active JIRA tickets this shift:
+  CMSPROD-5012: T1_ES_PIC partial outage (ACTIVE - see below)
+  CMSPROD-5008: T2_BR_SPRACE power issue (monitoring)
+  CMSTRANSF-1156: T2_KR_KISTI transfer slowdown (monitoring)
+
+--------------------------------------------------------------------------------
+MAIN ISSUE: T1_ES_PIC PARTIAL OUTAGE (CMSPROD-5012)
+--------------------------------------------------------------------------------
+
+Started ~10:30 UTC. T1_ES_PIC storage system had a controller failure
+affecting approximately 30% of storage nodes. Site is not fully down but
+significantly degraded:
+  - Job submission disabled in Unified to avoid failures
+  - Rucio rules to/from T1_ES_PIC suspended until storage stable
+  - ~340 TB of data at T1_ES_PIC potentially inaccessible (Rucio ConMon
+    showing inconsistencies on affected nodes)
+
+Current status (15:45 UTC): PIC site admins are working on it. Storage
+controller being replaced. ETA: possibly tonight, possibly tomorrow AM.
+Check GGUS-159201 for updates from site.
+
+ACTION FOR INCOMING SHIFT:
+  1. Monitor GGUS-159201 for updates from T1_ES_PIC
+  2. Do NOT re-enable T1_ES_PIC in Unified until storage team confirms
+     all nodes healthy and Rucio ConMon shows consistency
+  3. Check WMStats for any workflows that had jobs running at T1_ES_PIC
+     at time of failure - some may need manual cleanup in CMSPROD-5012
+  4. Rucio rules that were suspended: check rucio list-rules --account=wma_prod
+     --rse-expression=T1_ES_PIC --state=SUSPENDED and reevaluate once site OK
+
+Note: T1_ES_PIC holds the Spanish national tape copy of Run3 RAW data. The
+CERN tape copy is unaffected so there is no data loss risk, just reduced
+redundancy while PIC is down.
+
+--------------------------------------------------------------------------------
+WORKFLOW STATUS
+--------------------------------------------------------------------------------
+
+High priority workflows currently running:
+  - Run3 2025C re-reconstruction: 65% complete, running well at T1_DE_KIT,
+    T1_IT_CNAF, T1_US_FNAL. ETA ~36 hours to complete remaining.
+  - Winter25 MC campaign (TTbar, DY): Multiple workflows submitted this
+    morning via McM. All in Acquired state, starting to submit jobs.
+    Watch for any workflows getting stuck in Acquired > 3h.
+  - RelVal for CMSSW_15_0_2: Running at T1_US_FNAL. Check WMStats for
+    completion status - physics team waiting on these.
+
+Workflows force-completed this shift:
+  - None
+
+Workflows manually intervened this shift:
+  - CMSPROD-5010: Two DY MC workflows were assigned to T1_ES_PIC before
+    the outage. Reassigned to T1_DE_KIT via Unified after outage started.
+    Now running normally.
+
+--------------------------------------------------------------------------------
+DATA MANAGEMENT STATUS
+--------------------------------------------------------------------------------
+
+Overall transfer health: Good except for T1_ES_PIC suspensions.
+
+FTS throughput (last 6h average):
+  CERN -> T1 sites:  ~8.2 GB/s
+  T1 -> T2 sites:    ~12.4 GB/s
+  T2 -> T2 sites:    ~3.1 GB/s
+
+Pending tape archival at T0_CH_CERN_Tape: 18.3 TB queued, writing at ~2.1 GB/s.
+Expected queue clearance: ~2.5 hours. Normal.
+
+Active Rucio incidents:
+  T2_KR_KISTI: Transfers slow (~200 MB/s vs normal ~800 MB/s). Not failing,
+  just slow. Rucio rules set to REPLICATING state, will complete eventually.
+  Filed CMSTRANSF-1156. Monitor but no urgent action needed.
+
+--------------------------------------------------------------------------------
+ONGOING MONITORING ITEMS
+--------------------------------------------------------------------------------
+
+1. RelVal CMSSW_15_0_2 at T1_US_FNAL - check completion, physics team waiting
+2. T2_BR_SPRACE recovery expected ~18:00 UTC - verify and update CMSPROD-5008
+3. T1_ES_PIC - GGUS-159201 - critical, check for updates every 30 min
+4. Winter25 MC campaign workflows - ensure they progress from Acquired to Running
+
+--------------------------------------------------------------------------------
+HANDOVER NOTES
+--------------------------------------------------------------------------------
+
+Mattermost channels to watch:
+  #compops-oncall  - escalations and urgent issues
+  #cms-sites       - site admin communications  
+  #cms-production  - workflow team communications
+  #rucio-cms       - data management issues
+
+Useful dashboards:
+  WMStats:      http://cms-wmstats.cern.ch/wmstats
+  Unified:      http://cms-unified.cern.ch/
+  Rucio ConMon: http://cms-rucio-conmon.cern.ch/
+  FTS Monitor:  https://fts3.cern.ch/ftsmon/
+  CRIC:         https://cms-cric.cern.ch/
+
+Good luck with the shift. Main thing to watch is T1_ES_PIC.
+- Luca
+
+================================================================================
+END OF HANDOVER LOG
+================================================================================

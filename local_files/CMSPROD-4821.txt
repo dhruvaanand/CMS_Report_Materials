@@ -1,0 +1,137 @@
+JIRA Project: CMSPROD
+Ticket ID: CMSPROD-4821
+Title: WMAgent at T2_US_MIT in Draining state - no job submission for 2.5h
+Type: Bug
+Priority: High
+Reporter: on-shift-operator (A. Perez)
+Assignee: compops-oncall (M. Giordano)
+Created: 2025-11-14 08:32 UTC
+Updated: 2025-11-14 11:52 UTC
+Resolved: 2025-11-14 11:47 UTC
+Status: Closed
+Labels: wmagent, draining, couchdb, t2-us-mit
+Linked Issues: CMSPROD-4822 (follow-up: automated CouchDB index cleanup)
+
+================================================================================
+DESCRIPTION
+================================================================================
+
+WMAgent at T2_US_MIT has been in Draining state since ~06:00 UTC today.
+WMStats shows 0 running jobs at T2_US_MIT for the past 2.5 hours despite
+approximately 12,400 pending job units assigned to this agent in the Global
+WorkQueue.
+
+Affected workflows include several high-priority TTbar NanoAOD production
+requests that were assigned to T2_US_MIT specifically due to data locality
+(input NanoAOD datasets pinned at T2_US_MIT via Rucio).
+
+Quick checks done before filing:
+  - CRIC shows T2_US_MIT as Active, 4500 CPU slots available
+  - No GGUS ticket currently open against T2_US_MIT
+  - Rucio shows input datasets present at T2_US_MIT (REPLICATING -> OK ~18h ago)
+  - Other T2 sites submitting normally, issue appears isolated to MIT
+
+================================================================================
+COMMENTS
+================================================================================
+
+[A. Perez | 2025-11-14 08:45 UTC]
+Checked agent logs via kubectl. WMAgent container is running but producing
+repeated errors:
+
+  ERROR WMComponent.AgentStatusPoller: Failed to contact CouchDB
+  ERROR WMComponent.AgentStatusPoller: ConnectionRefusedError: [Errno 111] 
+        Connection refused at couch.t2.mit.edu:5984
+  WARNING WMComponent.WorkQueueManager: Cannot update element status, 
+          CouchDB unreachable. Entering safe Draining mode.
+
+This is the expected behavior - WMAgent enters Draining automatically when
+it cannot reach its local CouchDB instance, as a safety measure to avoid
+job submission without state tracking. The root issue is CouchDB being down,
+not the agent itself.
+
+[A. Perez | 2025-11-14 09:05 UTC]
+Attempted to reach couch.t2.mit.edu:5984 directly from lxplus:
+  $ curl -s http://couch.t2.mit.edu:5984/
+  curl: (7) Failed to connect to couch.t2.mit.edu port 5984: Connection refused
+
+CouchDB service is definitely down. Pinged T2_US_MIT site contact
+J. Rodriguez on Mattermost (#cms-sites channel).
+
+[J. Rodriguez (T2_US_MIT) | 2025-11-14 09:18 UTC]
+Hi - yes I can see it. The CouchDB service crashed around 05:55 UTC.
+Root cause is disk full on /var/lib/couchdb. The partition is at 100%.
+Disk filled up with stale view index files (_design doc indexes) that
+accumulated after we updated several WMAgent design documents last week
+and the old indexes were never cleaned up. Working on clearing space now.
+
+[A. Perez | 2025-11-14 09:20 UTC]
+Updating ticket with root cause: CouchDB disk exhaustion from stale view
+indexes. ETA from site admin is ~30 min for cleanup.
+
+Notified workflows team that T2_US_MIT will be unavailable for at least
+another hour. The TTbar NanoAOD workflows are data-pinned at MIT so we
+cannot reassign them to other sites without Rucio rule changes. Will hold.
+
+[J. Rodriguez (T2_US_MIT) | 2025-11-14 09:52 UTC]
+Cleared 218GB of stale CouchDB index files from /var/lib/couchdb/
+Disk now at 34% usage. Restarted CouchDB service:
+  $ systemctl restart couchdb
+  $ curl -s http://couch.t2.mit.edu:5984/
+  {"couchdb":"Welcome","version":"3.3.2","git_sha":"...","features":[...]}
+
+CouchDB is responding. WMAgent should recover automatically within a few
+minutes as its health check polling detects CouchDB is back.
+
+[M. Giordano | 2025-11-14 10:10 UTC]
+WMAgent has not auto-recovered - still showing Draining in WMStats after
+15 minutes. The agent appears to not be retrying the CouchDB connection.
+Manually triggering agent reconfiguration via REST API:
+
+  $ curl -X POST http://wmagent.t2.mit.edu:8240/agent/reconfigure \
+         -H "Content-Type: application/json"
+  {"result": "ok", "agent_state": "Running"}
+
+Agent transitioned to Running state. WMStats now shows job submission
+resuming at T2_US_MIT. Seeing ~40 jobs/min entering Running state.
+
+[M. Giordano | 2025-11-14 10:45 UTC]
+Recovery confirmed. WMStats shows:
+  T2_US_MIT Running: 1,840 jobs
+  T2_US_MIT Pending: 4,200 jobs
+  Submission rate: normal
+
+The two TTbar NanoAOD workflows are progressing. ETA to completion
+assuming current rates: ~6 hours.
+
+[A. Perez | 2025-11-14 11:47 UTC]
+Closing ticket. Site fully recovered, no further action required.
+
+Opening CMSPROD-4822 as a follow-up to track the implementation of
+automated CouchDB view index cleanup at T2 sites to prevent recurrence.
+
+================================================================================
+RESOLUTION
+================================================================================
+
+Root Cause:
+  CouchDB disk partition (/var/lib/couchdb) at T2_US_MIT reached 100% capacity
+  due to accumulation of stale view index files following WMAgent design document
+  updates. The old indexes were not cleaned up automatically.
+
+Impact:
+  WMAgent in Draining state for ~5h 47min (05:55 - 11:47 UTC).
+  Approximately 12,400 job units delayed. Two TTbar NanoAOD workflows delayed.
+  No data loss. No jobs failed due to this incident.
+
+Fix Applied:
+  1. Site admin cleared 218GB of stale CouchDB view indexes
+  2. CouchDB service restarted
+  3. WMAgent manually reconfigured via REST API to exit Draining state
+
+Time to Resolution: 3h 15m from ticket creation (5h 47m from actual start)
+
+Follow-up Actions:
+  - CMSPROD-4822: Implement automated CouchDB index cleanup cron job at T2 sites
+  - Consider adding CouchDB disk utilization to WMStats alerting dashboard
+  - Document manual WMAgent reconfiguration procedure in CompOps runbook

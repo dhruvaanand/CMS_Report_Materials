@@ -1,0 +1,132 @@
+================================================================================
+CMS CompOps Operational Runbook
+Title:  Diagnosing and Recovering Stuck or Stalled Workflows
+Version: 3.2  |  Last Updated: 2025-10-14
+Authors: CMS Computing Operations Team
+================================================================================
+
+OVERVIEW
+--------
+A workflow is "stuck" if it has not advanced in job submission or completion
+for more than 2-3 hours without an obvious explanation.
+
+Most common stuck states:
+  Acquired  - WMAgent received work units but no job submission observed
+  Running   - Jobs submitted but completion rate near zero
+  Completed - All jobs done but not transitioning to Closed-Out
+
+--------------------------------------------------------------------------------
+STEP 1: INITIAL ASSESSMENT
+--------------------------------------------------------------------------------
+
+Open WMStats: http://cms-wmstats.cern.ch/wmstats
+Sort by "last update". Workflows unchanged for >2h need investigation.
+
+Click the workflow to get:
+  - Responsible WMAgent hostname
+  - Job counts by site
+  - Input dataset name
+
+Quick checks before digging deeper:
+  a) Planned maintenance for the site? Check GGUS and CompOps calendar.
+  b) WMAgent in Draining/Down state? -> See WMAgent Recovery runbook.
+  c) Open GGUS ticket against the site?
+  d) Other workflows at same site also stuck? (-> site-level problem)
+  e) Input data present at site?
+       rucio list-rules --account=wma_prod <dataset_did>
+
+--------------------------------------------------------------------------------
+STEP 2: ACQUIRED-STATE STALLS
+--------------------------------------------------------------------------------
+
+Workflow in Acquired = WMAgent has the work but isn't submitting to HTCondor.
+
+2a. Check WMAgent health
+  $ curl -s http://<wmagent-hostname>:8240/agent/ | python -m json.tool
+  Look for "status": "running". Anything else -> WMAgent Recovery runbook.
+
+2b. Check CouchDB replication (most common cause)
+  WMAgent cannot submit jobs until its local CouchDB is synced with CERN.
+
+  Check active replication:
+  $ curl -s http://<wmagent-hostname>:5984/_active_tasks | python -m json.tool
+
+  Should show active tasks. Empty list or error tasks = replication stopped.
+
+  Check for errors:
+  $ curl -s 'http://<wmagent>:5984/_replicator/_all_docs?include_docs=true'
+
+  Common errors:
+    "db_not_found"       - database missing, needs recreation
+    "unauthorized"       - credential mismatch between local and central CouchDB
+    "connection_refused" - network issue to central CouchDB at CERN
+
+  Mild lag (tasks present but slow): wait 15-30 min, re-check.
+  Stopped replication: contact WMAgent expert to restart replication tasks.
+
+2c. Check input data availability
+  $ rucio list-rules --account=wma_prod <dataset_did>
+  Rule should be in OK state. If STUCK:
+  $ rucio-admin rule info <rule-id>
+  $ rucio-admin rule reevaluate --rule-id <rule-id>
+
+2d. Check HTCondor submission
+  $ kubectl logs <wmagent-pod> | grep -i "condor\|submit" | tail -100
+  Test CE connectivity:
+  $ globus-job-run <ce-hostname>/jobmanager-condor /bin/hostname
+  If CE rejecting submissions -> file GGUS ticket against site.
+
+--------------------------------------------------------------------------------
+STEP 3: RUNNING-STATE STALLS
+--------------------------------------------------------------------------------
+
+Jobs submitted but none completing.
+
+3a. Check FWJR exit codes in WMArchive
+  http://cms-wmarchive.cern.ch/ -> search by workflow name
+  
+  Exit code interpretation:
+    8001: Input file read error -> storage I/O issue or corrupt file
+    8002: Output write failure  -> storage full or permission issue
+    50115: CMSSW segfault       -> hardware or software bug
+    134: CMSSW aborted          -> memory issue or config error
+    84: Lost scheduler contact  -> transient, usually self-resolves
+
+  >50% same exit code = systematic problem.
+
+3b. For storage errors (8001/8002)
+  - Check site storage utilization (contact site admin)
+  - Test file accessibility: xrdfs <site-xrd-endpoint> ls <input-file-path>
+  - If systematic, consider excluding site in Unified
+
+3c. For software errors (50115/134)
+  - Check if issue is CMSSW-version specific
+  - Contact workflow requestor to verify configuration
+  - Escalate to workflow team if software bug suspected
+
+--------------------------------------------------------------------------------
+STEP 4: ESCALATION
+--------------------------------------------------------------------------------
+
+Escalate to @compops-oncall (Mattermost) if:
+  - Not resolved within 2 hours of active investigation
+  - Multiple workflows at same site simultaneously stuck
+  - T1 site involved
+  - Evidence of systematic infrastructure problem
+
+For site hardware issues: file GGUS ticket at https://ggus.eu
+
+--------------------------------------------------------------------------------
+DOCUMENTATION REQUIREMENT
+--------------------------------------------------------------------------------
+
+For any stuck workflow requiring >1h of investigation:
+  1. Open JIRA ticket in CMSPROD project
+  2. Document: workflow name, symptom, root cause, actions, resolution
+  3. Add note to shift handover log
+
+--------------------------------------------------------------------------------
+RELATED RUNBOOKS
+--------------------------------------------------------------------------------
+  WMAgent Recovery | Transfer Failure Investigation | Force Complete Procedure
+  CouchDB Maintenance | GlideinWMS Pilot Troubleshooting

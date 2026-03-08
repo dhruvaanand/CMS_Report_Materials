@@ -1,0 +1,298 @@
+================================================================================
+CMS CompOps: Monitoring Alerts Reference Guide
+================================================================================
+Version:      2025-10
+Maintained:   CMS CompOps Team
+Source:       AlertManager / MonIT-Elasticsearch configuration
+TWiki:        https://twiki.cern.ch/twiki/bin/view/CMS/CompOpsAlerts
+
+This document describes all operational alerts that CompOps shift operators
+may receive, their trigger conditions, severity, typical root causes, and
+step-by-step triage procedures.
+
+Alerts are delivered via Mattermost (#compops-alerts channel) and are also
+visible in the AlertManager web UI at http://cms-alertmanager.cern.ch/
+
+================================================================================
+SEVERITY DEFINITIONS
+================================================================================
+
+CRITICAL   Immediate action required. May indicate data loss risk or major 
+           service outage. Page on-call if not resolved within 15 minutes.
+
+HIGH       Action required within 1 hour. Significant impact on production
+           throughput or data availability.
+
+MEDIUM     Investigate within 2-3 hours. Limited impact if addressed promptly.
+
+LOW        Monitor. Investigate before end of shift if not self-resolving.
+
+INFO       Informational only. No action typically required.
+
+================================================================================
+ALERT: T0TapeWriteStall
+================================================================================
+Severity:  CRITICAL
+Source:    T0 monitoring / EOS buffer occupancy
+Trigger:   Writing to T0_CH_CERN_Tape has stalled for >20 minutes during
+           an active LHC fill with data taking in progress.
+
+What it means:
+  Raw collision data from the LHC is being collected by the CMS detector
+  online systems and written to a buffer in EOS (CERN disk storage) before
+  being transferred to tape for permanent archival. If tape writing stalls,
+  this buffer will fill up. When the buffer is full, online data taking must
+  stop - which means losing irreplaceable collision data.
+
+  This alert only fires during active LHC data taking periods (not during
+  technical stops or between fills).
+
+Triage:
+  1. IMMEDIATELY notify CompOps on-call (@compops-oncall) and T0 operations
+     team (@t0-ops) via Mattermost. Do not attempt to resolve alone.
+  2. Check EOS buffer occupancy: https://monit-grafana.cern.ch/t0-eos-buffer
+     - If >80%: CRITICAL - escalate immediately to CERN IT and T0 team
+     - If <60%: More time available, but still urgent
+  3. Check T0 tape operations dashboard: http://cms-t0mon.cern.ch/
+  4. Contact CERN tape storage operations: tape-ops@cern.ch (24/7)
+  5. Do not attempt independent resolution. This always requires escalation.
+
+================================================================================
+ALERT: WMAgentDraining
+================================================================================
+Severity:  HIGH
+Source:    WMStats poller (checks agent state every 5 minutes)
+Trigger:   A WMAgent has been in Draining state for >30 minutes with no
+           associated maintenance ticket in CMSPROD JIRA.
+
+What it means:
+  A WMAgent at a computing site has stopped accepting new jobs. This could
+  be planned (maintenance) or unplanned (failure). If unplanned, production
+  at that site has effectively stopped.
+
+Triage:
+  1. Check CMSPROD JIRA for a maintenance ticket referencing this site:
+     https://its.cern.ch/jira/projects/CMSPROD
+     If maintenance ticket exists: alert is expected, no action needed.
+     Update alert with "maintenance acknowledged" comment.
+
+  2. If no maintenance ticket, check WMAgent logs for why it entered Draining:
+       kubectl logs wmagent-<site>-<pod> | grep -i "drain\|draining" | tail -30
+
+  3. Most common cause: CouchDB connectivity loss. Check:
+       curl -s http://<couchdb-host>:5984/
+     If connection refused: CouchDB is down. Contact site admin.
+
+  4. If CouchDB issue confirmed, see runbook: Stuck Workflows, Section 2.3
+
+  5. After fixing underlying issue, recover agent:
+       curl -X POST http://<agent-host>:8240/agent/reconfigure \
+         -H "Content-Type: application/json" \
+         -d '{"team": "production", "status": "running"}'
+
+  6. If agent unrecoverable or site unresponsive within 1 hour: 
+     file GGUS ticket against the site.
+
+================================================================================
+ALERT: RucioTransferFailureSpike
+================================================================================
+Severity:  HIGH
+Source:    Rucio ConMon / OpenSearch (5-minute sliding window)
+Trigger:   Transfer failure rate for a specific site-pair exceeds 20%
+           sustained over a 15-minute window. Baseline failure rate ~2-3%.
+
+What it means:
+  A large fraction of Rucio data transfers between two specific sites are
+  failing. If not addressed, workflows requiring data at the destination
+  site will stall once their currently-available input is consumed.
+
+Triage:
+  1. Note which site-pair is affected from the alert (SOURCE -> DESTINATION)
+
+  2. Check FTS monitoring for that site-pair:
+       https://fts3.cern.ch/ftsmon/
+     Filter by source and destination RSE. Read the error messages.
+
+  3. Error 530 / "Login incorrect" / "Authentication failure":
+     -> FTS proxy credential expired at the source site
+     -> Check proxy validity: myproxy-info -s <myproxy-server> -l fts-cms-<site>
+     -> Contact site admin to renew proxy credential
+     -> File CMSTRANSF JIRA ticket
+
+  4. "No route to host" / "Connection timed out" / "Network unreachable":
+     -> Network issue between sites. Check network monitoring.
+     -> May be transient. Monitor for 30 minutes before escalating.
+     -> If persistent, contact network team and file GGUS.
+
+  5. "Disk quota exceeded" / "No space left on device":
+     -> Destination site storage is full.
+     -> Check storage utilization in CRIC.
+     -> Contact destination site admin.
+     -> Consider redirecting transfers to an alternate RSE.
+
+  6. Only one direction affected (A->B failing, B->A OK):
+     -> Issue is likely at the source (proxy, network from source, storage at source)
+
+  7. Multiple source sites all failing to same destination:
+     -> Issue is likely at the destination RSE
+
+================================================================================
+ALERT: WorkflowStuckInAcquired
+================================================================================
+Severity:  MEDIUM
+Source:    WMStats poller
+Trigger:   A workflow has been in Acquired state for >3 hours with zero
+           job submissions recorded in WMStats.
+
+What it means:
+  A workflow has been handed to a WMAgent but the agent is not submitting
+  jobs. This is distinct from a WMAgentDraining alert (which fires when the
+  agent itself is unhealthy). The agent may be healthy but unable to submit
+  this specific workflow due to missing data, configuration issues, or
+  DBS3/Rucio inconsistencies.
+
+Triage:
+  1. Verify WMAgent is healthy (not draining):
+       curl -s http://<agent-host>:8240/agent/
+     If agent is draining: address agent issue first (WMAgentDraining procedure)
+     If agent is running: proceed to step 2.
+
+  2. Check input data availability at target site:
+       rucio list-rules --account=wma_prod <input_dataset>
+     
+     No rules: MSTransferor has not created a rule. Check MSTransferor logs.
+     Rule REPLICATING: Transfer in progress. Wait and monitor.
+     Rule STUCK: Transfer blocked. Investigate transfer failure.
+     Rule OK: Data should be available. Proceed to step 3.
+
+  3. Check MSTransferor logs for this workflow:
+       kubectl logs ms-transferor-prod-<pod> | grep "<workflow-fragment>"
+     Look for error messages about rule creation failures.
+
+  4. If MSTransferor tried and failed with "DID not found":
+     Dataset registered in DBS3 but not in Rucio - escalate to WMCore team.
+
+  5. If data is available and agent is healthy but still no jobs:
+     Check the WMAgent's JobSplitter output for this workflow in CouchDB.
+     May require WMCore developer assistance.
+
+  See also: Full Stuck Workflow runbook.
+
+================================================================================
+ALERT: SiteJobFailureRateHigh
+================================================================================
+Severity:  MEDIUM
+Source:    HTCondor job monitoring / WMStats FWJR analysis
+Trigger:   Job failure rate at a specific site exceeds 40% over a 1-hour
+           window. Normal baseline is site-dependent but typically 3-8%.
+
+What it means:
+  A large fraction of CMS jobs running at a site are exiting with errors.
+  This may indicate site infrastructure problems but could also be a CMS
+  software or configuration issue.
+
+Triage:
+  1. Check if the pattern is site-wide or workflow-specific:
+     - If one workflow has 100% failure rate and others are OK: likely software issue
+     - If all workflows at the site have elevated failure rates: site issue
+
+  2. Examine FWJR errors for failing jobs in WMStats:
+     Click: failing workflow -> Failed jobs -> View FWJR
+     
+     Error patterns and likely causes:
+       "Cannot find PCM / libFW*.so not found" -> CVMFS unavailable
+       "Cannot connect to XRootD server"        -> Storage/network issue
+       "Killed" (exit code 137)                 -> Memory limit exceeded
+       "DiskSpaceFull" / ENOSPC                 -> Worker node scratch disk full
+       "cms::Exception: Fatal Root Error"       -> CMSSW/configuration bug
+       Exit code 8021 (WMAgent timeout)         -> Job ran too long
+
+  3. For CVMFS errors: check CVMFS Stratum-1 status (see CVMFS runbook)
+     Simultaneous failures at geographically nearby sites -> Stratum-1 issue
+
+  4. For storage/network errors: contact site admin, file GGUS if needed
+
+  5. For memory kills: check if recent CMSSW version increased memory usage.
+     May need to increase job memory request in workflow configuration.
+     Escalate to physics group.
+
+  6. If failure rate >60% and not quickly resolvable:
+     Exclude site from production in Unified while investigating:
+     Unified -> Site Management -> <site> -> Disable Production
+
+================================================================================
+ALERT: GlobalWorkQueueBacklogHigh
+================================================================================
+Severity:  LOW
+Source:    WMStats / Global WorkQueue poller
+Trigger:   Global WorkQueue pending job units exceed 800,000 (configurable).
+           Normal operating range is 100,000 - 500,000.
+
+What it means:
+  The rate of new workflow submissions is exceeding the processing capacity
+  of the currently active computing resources. This is often temporary and
+  self-correcting, but if the backlog grows continuously it may indicate
+  systematic site problems or an unusually large production campaign.
+
+Triage:
+  1. Check WMStats for sites with significantly reduced throughput.
+     Are multiple WMAgentDraining alerts also active? -> Correlated site outages.
+
+  2. Check if a large batch of new workflows was recently submitted:
+     ReqMgr2 shows recent submissions by timestamp.
+     A sudden influx of new workflows temporarily elevates the backlog.
+
+  3. If backlog has grown >20% in the past hour with no obvious cause:
+     Check Unified for workflows in unusual states (large numbers in Acquired
+     without jobs submitting).
+
+  4. If backlog is decreasing or stable: no action needed. Monitor.
+
+  5. If backlog is growing rapidly and multiple sites are degraded:
+     Consider pausing new workflow submissions via Unified.
+     Escalate to CompOps management if backlog exceeds 2 million units.
+
+================================================================================
+ALERT: RucioConMonConsistencyError
+================================================================================
+Severity:  LOW (unless affecting active workflow data)
+Source:    Rucio ConMon consistency monitoring
+Trigger:   Rucio ConMon detects >1000 files that Rucio believes are present
+           at a site but cannot be verified as physically present on storage.
+
+What it means:
+  There is a discrepancy between Rucio's database (which says certain files
+  exist at a site) and the actual physical storage at that site. Files that
+  Rucio thinks exist might be physically missing, which would cause jobs to
+  fail when trying to read them.
+
+Triage:
+  1. Check which site and dataset is affected from the alert.
+
+  2. Check if any active workflows use data at this site:
+     rucio list-rules --rse=<affected-site> | grep "wma_prod"
+
+  3. If active workflows use affected data: escalate to HIGH priority.
+     Preemptively redirect those workflows to use data at alternative sites.
+
+  4. Contact site admin with the list of files Rucio cannot verify.
+     Site admin should check physical storage.
+
+  5. If files are physically missing (deleted without Rucio's knowledge):
+     File GGUS ticket. Rucio rules will need to be re-triggered to replace
+     the missing files.
+
+================================================================================
+CONTACTS AND ESCALATION
+================================================================================
+
+CompOps on-call (Mattermost):  @compops-oncall  (24/7 for CRITICAL/HIGH)
+CompOps ops channel:           #compops-ops
+CompOps transfers channel:     #compops-transfers
+WMCore developers:             #wmcore-dev
+T0 operations:                 @t0-ops, t0-ops@cern.ch
+CERN tape operations:          tape-ops@cern.ch  (24/7)
+Network support:               network-support@cern.ch
+GGUS (site issues):            https://ggus.eu
+Rucio support:                 #rucio-users (CERN Mattermost)
+================================================================================
